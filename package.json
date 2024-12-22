@@ -1,9 +1,0 @@
-{
-  "name": "memecoin-tweets",
-  "version": "1.0.0",
-  "description": "Fetch tweets for memecoins using RapidAPI",
-  "main": "fetch_memecoin_tweets.js",
-  "dependencies": {
-    "dotenv": "^16.3.1"
-  }
-}

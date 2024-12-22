@@ -86,14 +86,13 @@ function needsUpdate(existingData, coin) {
     return lastPriceDate.toDateString() !== today.toDateString();
 }
 
-// Helper function to implement exponential backoff
 async function fetchWithRetry(url, options, retryCount = 0) {
     try {
         await limiter();
         const response = await fetch(url, options);
         
         if (response.status === 429 && retryCount < MAX_RETRIES) {
-            const waitTime = Math.pow(2, retryCount) * 10000; // exponential backoff: 10s, 20s, 40s
+            const waitTime = Math.pow(2, retryCount) * 10000;
             console.log(`Rate limited. Waiting ${waitTime/1000} seconds before retry ${retryCount + 1}/${MAX_RETRIES}...`);
             await delay(waitTime);
             return fetchWithRetry(url, options, retryCount + 1);
@@ -138,6 +137,21 @@ async function getTopCoins() {
     }
 }
 
+async function getCoinMetadata(coinId) {
+    try {
+        const response = await fetchWithRetry(
+            `https://api.coingecko.com/api/v3/coins/${coinId}?localization=false&tickers=false&market_data=false&community_data=true&developer_data=false`,
+            { method: 'GET', headers }
+        );
+        
+        const data = await response.json();
+        return data;
+    } catch (error) {
+        console.error(`Error fetching metadata for ${coinId}:`, error);
+        return null;
+    }
+}
+
 async function getHistoricalPrices(coinId) {
     try {
         const response = await fetchWithRetry(
@@ -157,17 +171,88 @@ async function getHistoricalPrices(coinId) {
     }
 }
 
-// Helper function to check if we need to refresh the coin list
 function needsListRefresh(existingData) {
     if (Object.keys(existingData).length === 0) {
         return true;
     }
 
-    // Check if any coin was updated in the last hour
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
     return !Object.values(existingData).some(coin => 
         new Date(coin.last_updated) > oneHourAgo
     );
+}
+
+async function getImageFromCryptoLogos(symbol) {
+    try {
+        // CryptoLogos.cc format: https://cryptologos.cc/logos/bitcoin-btc-logo.png
+        const formattedSymbol = symbol.toLowerCase();
+        const url = `https://cryptologos.cc/logos/${formattedSymbol}-${formattedSymbol}-logo.png`;
+        const response = await fetch(url);
+        if (response.ok) {
+            return url;
+        }
+        return null;
+    } catch (error) {
+        console.error(`Error checking CryptoLogos for ${symbol}:`, error);
+        return null;
+    }
+}
+
+async function getImageFromCryptoIcons(symbol) {
+    try {
+        // Crypto Icons format: https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/128/color/btc.png
+        const formattedSymbol = symbol.toLowerCase();
+        const url = `https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/128/color/${formattedSymbol}.png`;
+        const response = await fetch(url);
+        if (response.ok) {
+            return url;
+        }
+        return null;
+    } catch (error) {
+        console.error(`Error checking CryptoIcons for ${symbol}:`, error);
+        return null;
+    }
+}
+
+async function getBestImageUrl(coin) {
+    // Try different sources in order of preference
+    const sources = [
+        // 1. Try CoinGecko image if available
+        async () => coin.image,
+        // 2. Try CryptoLogos.cc
+        async () => await getImageFromCryptoLogos(coin.symbol),
+        // 3. Try Crypto Icons GitHub repository
+        async () => await getImageFromCryptoIcons(coin.symbol)
+    ];
+
+    for (const getImage of sources) {
+        const imageUrl = await getImage();
+        if (imageUrl) {
+            return imageUrl;
+        }
+    }
+
+    return null;
+}
+
+async function downloadImage(imageUrl, coinId) {
+    try {
+        const response = await fetch(imageUrl);
+        if (!response.ok) throw new Error(`Failed to fetch image: ${response.status}`);
+        
+        const imagesDir = path.join(BACKUP_DIR, 'images');
+        if (!fs.existsSync(imagesDir)) {
+            fs.mkdirSync(imagesDir, { recursive: true });
+        }
+
+        const imageBuffer = await response.arrayBuffer();
+        const imagePath = path.join(imagesDir, `${coinId}.png`);
+        fs.writeFileSync(imagePath, Buffer.from(imageBuffer));
+        return imagePath;
+    } catch (error) {
+        console.error(`Error downloading image for ${coinId}:`, error);
+        return null;
+    }
 }
 
 async function getAllMemecoinPrices() {
@@ -186,14 +271,14 @@ async function getAllMemecoinPrices() {
         console.log(`Found ${memecoins.length} memecoins\n`);
     } else {
         console.log('Using existing coin list from last update');
-        // Convert existing data to format matching CoinGecko API response
         memecoins = Object.entries(existingData).map(([id, data]) => ({
             id,
             name: data.name,
             symbol: data.symbol,
             market_cap_rank: data.market_cap_rank,
             current_price: data.current_price,
-            market_cap: data.market_cap
+            market_cap: data.market_cap,
+            image: data.image_url
         }));
         console.log(`Found ${memecoins.length} existing memecoins\n`);
     }
@@ -210,6 +295,16 @@ async function getAllMemecoinPrices() {
             continue;
         }
 
+        // Get additional metadata
+        const metadata = await getCoinMetadata(coin.id);
+        
+        // Download image if available
+        let imagePath = null;
+        if (coin.image && (!existingData[coin.id] || !existingData[coin.id].image_local_path)) {
+            console.log(`Downloading image for ${coin.name}...`);
+            imagePath = await downloadImage(coin.image, coin.id);
+        }
+
         existingData[coin.id] = {
             name: coin.name,
             symbol: coin.symbol.toUpperCase(),
@@ -218,7 +313,15 @@ async function getAllMemecoinPrices() {
             market_cap: coin.market_cap,
             days: DAYS,
             last_updated: new Date().toISOString(),
-            historical_prices: []
+            image_url: coin.image || null,
+            image_local_path: imagePath || (existingData[coin.id] ? existingData[coin.id].image_local_path : null),
+            historical_prices: [],
+            // Additional metadata
+            description: metadata?.description?.en || null,
+            categories: metadata?.categories || [],
+            links: metadata?.links || {},
+            community_data: metadata?.community_data || {},
+            watchlist_portfolio_users: metadata?.watchlist_portfolio_users || 0
         };
         
         const prices = await getHistoricalPrices(coin.id);
@@ -233,7 +336,6 @@ async function getAllMemecoinPrices() {
             console.log(`Updated and saved data for ${coin.name}`);
         }
         
-        // Add a small delay between processing each coin
         await delay(2000);
     }
 
