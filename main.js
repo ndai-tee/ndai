@@ -1,9 +1,13 @@
 require('dotenv').config();
 const { RateLimit } = require('async-sema');
+const fs = require('fs');
+const path = require('path');
 
 const MAX_COINS = 10;
 const DAYS = 30;
 const MAX_RETRIES = 3;
+const DATA_FILE = 'memecoin_data.json';
+const BACKUP_DIR = 'backups';
 
 // Create rate limiter: 10 requests per minute = 1 request per 6 seconds
 const limiter = RateLimit(10, { timeUnit: 60000 });
@@ -16,6 +20,71 @@ const headers = {
 
 // Helper function to delay execution
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Helper function to load existing data
+function loadExistingData() {
+    try {
+        if (fs.existsSync(DATA_FILE)) {
+            const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+            console.log(`Loaded existing data for ${Object.keys(data).length} coins`);
+            return data;
+        }
+    } catch (error) {
+        console.error('Error loading existing data:', error);
+    }
+    return {};
+}
+
+// Helper function to save data
+function saveData(data) {
+    try {
+        // Save main data file
+        fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+
+        // Create backup directory if it doesn't exist
+        if (!fs.existsSync(BACKUP_DIR)) {
+            fs.mkdirSync(BACKUP_DIR);
+        }
+
+        // Create timestamped backup
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        fs.writeFileSync(
+            path.join(BACKUP_DIR, `memecoin_data_${timestamp}.json`),
+            JSON.stringify(data, null, 2)
+        );
+    } catch (error) {
+        console.error('Error saving data:', error);
+    }
+}
+
+// Helper function to check if coin needs update
+function needsUpdate(existingData, coin) {
+    if (!existingData[coin.id]) {
+        return true;
+    }
+
+    const existing = existingData[coin.id];
+    
+    // Check if any key metrics have changed
+    if (existing.market_cap_rank !== coin.market_cap_rank ||
+        existing.current_price !== coin.current_price ||
+        existing.market_cap !== coin.market_cap) {
+        return true;
+    }
+
+    // Check if we have historical prices for the specified number of days
+    if (!existing.historical_prices || 
+        !existing.historical_prices.length || 
+        !existing.days || 
+        existing.days !== DAYS) {
+        return true;
+    }
+
+    // Check if the most recent price is from today
+    const lastPriceDate = new Date(existing.historical_prices[existing.historical_prices.length - 1].date);
+    const today = new Date();
+    return lastPriceDate.toDateString() !== today.toDateString();
+}
 
 // Helper function to implement exponential backoff
 async function fetchWithRetry(url, options, retryCount = 0) {
@@ -88,53 +157,92 @@ async function getHistoricalPrices(coinId) {
     }
 }
 
-async function getAllMemecoinPrices() {
-    console.log(`Fetching top ${MAX_COINS} memecoins...`);
-    const memecoins = await getTopCoins();
-    
-    if (!memecoins) {
-        console.error('Failed to fetch memecoins list');
-        return;
+// Helper function to check if we need to refresh the coin list
+function needsListRefresh(existingData) {
+    if (Object.keys(existingData).length === 0) {
+        return true;
     }
 
-    console.log(`Found ${memecoins.length} memecoins\n`);
+    // Check if any coin was updated in the last hour
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    return !Object.values(existingData).some(coin => 
+        new Date(coin.last_updated) > oneHourAgo
+    );
+}
 
-    const memecoinData = {};
+async function getAllMemecoinPrices() {
+    console.log('Loading existing data...');
+    const existingData = loadExistingData();
+    let memecoins = [];
+    
+    if (needsListRefresh(existingData)) {
+        console.log(`Fetching top ${MAX_COINS} memecoins...`);
+        memecoins = await getTopCoins();
+        
+        if (!memecoins) {
+            console.error('Failed to fetch memecoins list');
+            return;
+        }
+        console.log(`Found ${memecoins.length} memecoins\n`);
+    } else {
+        console.log('Using existing coin list from last update');
+        // Convert existing data to format matching CoinGecko API response
+        memecoins = Object.entries(existingData).map(([id, data]) => ({
+            id,
+            name: data.name,
+            symbol: data.symbol,
+            market_cap_rank: data.market_cap_rank,
+            current_price: data.current_price,
+            market_cap: data.market_cap
+        }));
+        console.log(`Found ${memecoins.length} existing memecoins\n`);
+    }
+
+    let updatedCount = 0;
+    let skippedCount = 0;
 
     for (const coin of memecoins) {
         console.log(`Processing: ${coin.name} (${coin.symbol.toUpperCase()})`);
         
-        memecoinData[coin.id] = {
+        if (!needsUpdate(existingData, coin)) {
+            console.log(`Skipping ${coin.name} - already up to date`);
+            skippedCount++;
+            continue;
+        }
+
+        existingData[coin.id] = {
             name: coin.name,
             symbol: coin.symbol.toUpperCase(),
             market_cap_rank: coin.market_cap_rank,
             current_price: coin.current_price,
             market_cap: coin.market_cap,
+            days: DAYS,
+            last_updated: new Date().toISOString(),
             historical_prices: []
         };
         
         const prices = await getHistoricalPrices(coin.id);
         if (prices) {
-            memecoinData[coin.id].historical_prices = prices.map(([timestamp, price]) => ({
+            existingData[coin.id].historical_prices = prices.map(([timestamp, price]) => ({
                 date: new Date(timestamp).toISOString().split('T')[0],
                 price: price
             }));
+            updatedCount++;
+            // Save after each successful update
+            saveData(existingData);
+            console.log(`Updated and saved data for ${coin.name}`);
         }
         
         // Add a small delay between processing each coin
         await delay(2000);
     }
 
-    const fs = require('fs');
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    fs.writeFileSync(
-        `memecoin_data_${timestamp}.json`,
-        JSON.stringify(memecoinData, null, 2)
-    );
-
-    console.log('\nData collection complete! Results saved to file.');
+    console.log('\nData collection complete!');
     console.log('Summary:');
-    console.log(`Total memecoins processed: ${Object.keys(memecoinData).length}`);
+    console.log(`Total memecoins found: ${memecoins.length}`);
+    console.log(`Coins updated: ${updatedCount}`);
+    console.log(`Coins skipped (up to date): ${skippedCount}`);
+    console.log(`Total coins in dataset: ${Object.keys(existingData).length}`);
 }
 
 // Execute the main function
