@@ -1,17 +1,9 @@
 {
-  "name": "sharktank",
+  "name": "memecoin-tweets",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "description": "Fetch tweets for memecoins using RapidAPI",
+  "main": "fetch_memecoin_tweets.js",
   "dependencies": {
-    "agent-twitter-client": "^0.0.17",
-    "async-sema": "^3.1.1",
-    "dotenv": "^16.4.7"
+    "dotenv": "^16.3.1"
   }
 }
