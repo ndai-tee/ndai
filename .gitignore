@@ -3,3 +3,5 @@ venv/
 .env
 __pycache__/
 audio_output/
+lip_sync_output/
+minecraft_output/
