@@ -1,4 +1,4 @@
-node_modules
-.env
-backups
 venv/
+.DS_Store
+.env
+__pycache__/
