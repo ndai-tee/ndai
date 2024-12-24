@@ -5,9 +5,10 @@ import argparse
 import os
 from twitter import get_verified_tweets, analyze_sentiment
 from dotenv import load_dotenv
+from grok import get_multiple_opinions  # Add import for celebrity opinions
 
 # Configuration
-DAYS_TO_ANALYZE = 60  # Number of days to look back for Twitter analysis
+DAYS_TO_ANALYZE = 1  # Number of days to look back for Twitter analysis
 
 def analyze_memecoin(image_path: str, description: str, coin_name: str) -> dict:
     """
@@ -147,6 +148,12 @@ def main():
         print("\nFull Analysis:")
         print(result['full_analysis'])
         
+        # Get celebrity opinions
+        print("\n=== Celebrity Opinions ===")
+        celebrity_opinions = get_multiple_opinions(args.coin, result['full_analysis'])
+        for celeb, opinion in celebrity_opinions:
+            print(f"\n{celeb}: {opinion}")
+        
         # Save complete results
         import json
         from datetime import datetime
@@ -160,7 +167,8 @@ def main():
                 'description': args.description,
                 'recommendation': result['recommendation'],
                 'full_analysis': result['full_analysis'],
-                'twitter_analysis': result['twitter_analysis']
+                'twitter_analysis': result['twitter_analysis'],
+                'celebrity_opinions': [(celeb, opinion) for celeb, opinion in celebrity_opinions]  # Add celebrity opinions to JSON
             }, f, indent=2)
         print(f"\nComplete analysis saved to {output_file}")
         
