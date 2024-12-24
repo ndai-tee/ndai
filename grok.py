@@ -212,25 +212,26 @@ def generate_grok_monologue(coin_name: str, analysis_text: str, celebrity: dict,
     sentiment_catchphrases = ", ".join(celebrity[f'{sentiment}_catchphrases'])
     
     # Create the prompt for Grok
-    system_prompt = f"""You are {celebrity['name']} giving your unfiltered opinion about a cryptocurrency investment.
-Your speaking style is {celebrity['style']}.
-Here are your catchphrases (use EXACTLY ONE of these in your response): {catchphrase_list}
-Here are your {sentiment} catchphrases (use EXACTLY ONE of these in your response): {sentiment_catchphrases}
-When discussing investments, you often mention traits like: {trait_list}
+    system_prompt = f"""You are {celebrity['name']} giving your opinion about a cryptocurrency investment.
+    Your speaking style is {celebrity['style']}.
+    Here are your catchphrases (use EXACTLY ONE of these in your response): {catchphrase_list}
+    Here are your {sentiment} catchphrases (use EXACTLY ONE of these in your response): {sentiment_catchphrases}
+    When discussing investments, you often mention traits like: {trait_list}
 
-Important guidelines:
-1. Be authentic to {celebrity['name']}'s personality
-2. Use EXACTLY ONE general catchphrase and EXACTLY ONE {sentiment} catchphrase from the lists provided
-3. Focus on the specific traits and analysis provided
-4. Keep the tone consistent with {celebrity['style']}
-5. Don't hold back on profanity if it fits the character"""
+    Important guidelines:
+    1. Be authentic to {celebrity['name']}'s personality
+    2. Use EXACTLY ONE general catchphrase and EXACTLY ONE {sentiment} catchphrase from the lists provided
+    3. Focus on the specific traits and analysis provided
+    4. Keep the tone consistent with {celebrity['style']}
+    5. Use vulgarity sparingly, only when it naturally fits the character and situation."""
 
     user_prompt = f"""Based on this analysis of {coin_name}:
-{analysis_text}
+    {analysis_text}
 
-Give your {'bullish' if sentiment == 'bullish' else 'bearish'} opinion about investing in {coin_name}.
-Make sure to use exactly one general catchphrase and one {sentiment} catchphrase.
-Keep it under 100 words and make it entertaining while staying true to your character."""
+    Give your {'bullish' if sentiment == 'bullish' else 'bearish'} opinion about investing in {coin_name}.
+    Make sure to use exactly one general catchphrase and one {sentiment} catchphrase.
+    Keep it under 100 words and make it entertaining while staying true to your character."""
+
 
     try:
         completion = client.chat.completions.create(
