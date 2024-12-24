@@ -44,6 +44,13 @@ CELEBRITIES = [
         "bullish_traits": ["destiny bullshit", "grand vision", "revolutionary shit"],
         "bearish_traits": ["cautionary fucking tale", "same old patterns", "market wisdom"]
     },
+    {
+        "name": "Keanu Reeves",
+        "style": "zen-like",
+        "catchphrases": ["Whoa, dude!", "I'm just a guy, man", "Take it easy"],
+        "bullish_traits": ["true blue", "genuine vibe", "heart of gold"],
+        "bearish_traits": ["too laidback", "not in it for the cash", "too damn nice"]
+    }
 ]
 
 def filter_emojis(text: str) -> str:
