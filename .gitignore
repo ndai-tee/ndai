@@ -1,5 +1,2 @@
 venv/
-.DS_Store
 .env
-__pycache__/
-audio_output/

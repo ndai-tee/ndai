@@ -1,238 +1,259 @@
-from datetime import datetime
-import json
+"""
+Example input (copy and paste this into terminal):
+
+echo '{"image": "https://cdn.pixabay.com/photo/2018/10/31/22/42/squirrel-3786845_1280.jpg", "token_name": "squirrelnuts", "pitch": "SquirrelNuts is revolutionizing decentralized storage by utilizing a unique gathering and storing mechanism inspired by natures most efficient data hoarders. Just as squirrels expertly cache their nuts for future use, our protocol enables users to efficiently store and retrieve data across our network, with an innovative scarcity model based on seasonal storage cycles."}' | python3 main.py
+"""
+
+import requests
+from transformers import AutoModelForCausalLM, AutoProcessor
 from PIL import Image
+import io
 import torch
-from transformers import AutoProcessor, AutoModelForCausalLM
-import argparse
+import json
 import os
-from twitter import get_verified_tweets, analyze_sentiment
 from dotenv import load_dotenv
-from grok import get_multiple_opinions
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Any
 
-# Configuration
-DAYS_TO_ANALYZE = 5  # Number of days to look back for Twitter analysis
+# Load environment variables
+load_dotenv()
+COINGECKO_API_KEY = os.getenv('COINGECKO_API_KEY')
+RAPID_API_KEY = os.getenv('RAPID_API_KEY')
 
-def get_tweets_for_day(coin_name: str, days_back: int, api_key: str) -> list:
-    """Get tweets for a specific day"""
-    return get_verified_tweets(coin_name, days_back=days_back, api_key=api_key)
-
-def get_twitter_analysis(coin_name: str) -> Dict[str, Any]:
-    """Get Twitter sentiment analysis in parallel"""
-    print("Fetching Twitter sentiment...")
-    print(f"Getting tweets for the last {DAYS_TO_ANALYZE} days:")
-    
-    api_key = os.getenv('RAPIDAPI_KEY')
-    tweets = []
-    
-    with ThreadPoolExecutor(max_workers=DAYS_TO_ANALYZE) as executor:
-        future_to_day = {
-            executor.submit(get_tweets_for_day, coin_name, days_back + 1, api_key): days_back
-            for days_back in range(DAYS_TO_ANALYZE)
-        }
-        
-        for future in as_completed(future_to_day):
-            days_back = future_to_day[future]
-            try:
-                daily_tweets = future.result()
-                tweets.extend(daily_tweets)
-                print(f"✓ Fetched tweets from {days_back} days ago")
-            except Exception as e:
-                print(f"× Failed to fetch tweets from {days_back} days ago: {str(e)}")
-    
-    twitter_analysis = analyze_sentiment(tweets)
-    
-    # Create Twitter summary for the prompt
-    twitter_summary = f"\nVerified Twitter Activity in last {DAYS_TO_ANALYZE} days:"
-    twitter_summary += f"\n- Total Tweets: {twitter_analysis['total_tweets']}"
-    twitter_summary += f"\n- Total Engagement: {twitter_analysis['total_engagement']}"
-    
-    if twitter_analysis['high_engagement_tweets']:
-        twitter_summary += "\n\nTop Engaging Tweets:"
-        for i, tweet in enumerate(twitter_analysis['high_engagement_tweets'][:3], 1):
-            twitter_summary += f"\n{i}. @{tweet['user']['username']}: {tweet['text'][:200]}..."
-    
-    return {
-        'analysis': twitter_analysis,
-        'summary': twitter_summary
-    }
-
-def get_vision_analysis(image_path: str, description: str, twitter_summary: str) -> Dict[str, Any]:
-    """Get vision model analysis"""
-    print("\nRunning vision analysis...")
-    
-    # Determine device
+def get_device():
     if torch.cuda.is_available():
-        device = "cuda"
+        return "cuda"
     elif torch.backends.mps.is_available():
-        device = "cpu"  # Using CPU for stability with MPS
-    else:
-        device = "cpu"
-        
-    print(f"Using device: {device}")
-    
-    model_id = "microsoft/Phi-3.5-vision-instruct"
-    
-    # Initialize model with flash attention
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        device_map=device,
-        trust_remote_code=True,
-        torch_dtype=torch.float32,
-        _attn_implementation='eager'
-    )
-    
-    # Initialize processor
-    processor = AutoProcessor.from_pretrained(
-        model_id,
-        trust_remote_code=True,
-        num_crops=4
-    )
-    
-    # Load and prepare the image
-    image = Image.open(image_path).convert("RGB")
-    
-    # Prepare the chat message with Twitter data
-    messages = [
-        {
-            "role": "user",
-            "content": f"<|image_1|>\nAnalyze this memecoin image and the following description as a cryptocurrency investment expert.\n\nDescription: {description}\n{twitter_summary}\n\nProvide a detailed analysis considering:\n1. Visual branding and appeal\n2. Twitter engagement and verified user sentiment\n3. Market potential and risks\n\nConclude with a clear INVEST or DO NOT INVEST recommendation and include a confidence score from 0-100%."
-        }
-    ]
-    
-    # Create prompt using chat template
-    prompt = processor.tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True
-    )
-    
-    # Process inputs
-    inputs = processor(prompt, [image], return_tensors="pt")
-    
-    # Move inputs to the same device as model
-    inputs = {k: v.to(device) for k, v in inputs.items() if hasattr(v, 'to')}
-    
-    # Generate response
-    generation_args = {
-        "max_new_tokens": 1000,
-        "temperature": 0.7,
-        "do_sample": True,
-    }
-    
-    generate_ids = model.generate(
-        **inputs,
-        eos_token_id=processor.tokenizer.eos_token_id,
-        **generation_args
-    )
-    
-    # Move tensors back to CPU for decoding
-    generate_ids = generate_ids.cpu()
-    
-    # Remove input tokens and decode response
-    generate_ids = generate_ids[:, inputs['input_ids'].shape[1]:]
-    response_text = processor.batch_decode(
-        generate_ids,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False
-    )[0]
-    
-    # Determine recommendation based on strict keyword matching
-    recommendation = 'DO NOT INVEST'
-    if 'INVEST' in response_text.upper() and not any(phrase in response_text.upper() for phrase in ['DO NOT INVEST', 'DON\'T INVEST', 'NOT INVEST']):
-        recommendation = 'INVEST'
-    
-    return {
-        'recommendation': recommendation,
-        'full_analysis': response_text
-    }
+        return "cpu"
+    return "cpu"
 
-def analyze_memecoin(image_path: str, description: str, coin_name: str) -> dict:
-    """
-    Analyze a memecoin using Phi-3.5-vision model and Twitter sentiment in parallel.
-    
-    Args:
-        image_path (str): Path to the memecoin image
-        description (str): Description of the memecoin
-        coin_name (str): Name of the coin for Twitter analysis
-    
-    Returns:
-        dict: Analysis results including recommendation and confidence
-    """
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        # Start Twitter analysis
-        twitter_future = executor.submit(get_twitter_analysis, coin_name)
-        
-        try:
-            # Wait for Twitter analysis to get summary for vision model
-            twitter_result = twitter_future.result()
-            
-            # Start vision analysis with Twitter summary
-            vision_future = executor.submit(get_vision_analysis, image_path, description, twitter_result['summary'])
-            vision_result = vision_future.result()
-            
-            return {
-                'recommendation': vision_result['recommendation'],
-                'full_analysis': vision_result['full_analysis'],
-                'twitter_analysis': twitter_result['analysis']
-            }
-            
-        except Exception as e:
-            raise Exception(f"Analysis failed: {str(e)}")
-
-def main():
-    load_dotenv()  # Load environment variables
-    
-    parser = argparse.ArgumentParser(description='Analyze a memecoin using vision model and Twitter sentiment')
-    parser.add_argument('--image', required=True, help='Path to the memecoin image')
-    parser.add_argument('--description', required=True, help='Description of the memecoin')
-    parser.add_argument('--coin', required=True, help='Name of the coin for Twitter analysis')
-    
-    args = parser.parse_args()
+def get_tweets(query):
+    url = "https://twitter-api45.p.rapidapi.com/search.php"
+    querystring = {"query": query, "search_type": "Top"}
+    headers = {
+        "x-rapidapi-key": RAPID_API_KEY,
+        "x-rapidapi-host": "twitter-api45.p.rapidapi.com"
+    }
     
     try:
-        # Run main analysis
-        result = analyze_memecoin(args.image, args.description, args.coin)
+        response = requests.get(url, headers=headers, params=querystring)
+        data = response.json()
+        tweets = []
+        if data and 'timeline' in data:
+            for tweet in data['timeline'][:5]:
+                if 'text' in tweet and 'type' in tweet and tweet['type'] == 'tweet':
+                    tweets.append(tweet['text'])
+        return tweets
+    except Exception as e:
+        print(f"Error fetching tweets: {e}")
+        return []
+
+def download_image(url):
+    try:
+        response = requests.get(url)
+        return Image.open(io.BytesIO(response.content))
+    except Exception as e:
+        print(f"Error downloading image: {e}")
+        return None
+
+def check_token_exists(pitch):
+    """
+    Check if the token mentioned in the pitch exists on CoinGecko.
+    Returns (exists, token_name) tuple.
+    """
+    try:
+        # Extract potential token name from the first sentence of the pitch
+        first_sentence = pitch.split('.')[0].lower()
+        potential_tokens = [word for word in first_sentence.split() if len(word) > 2]
         
-        print("\n=== Memecoin Analysis Results ===")
-        print("\nFinal Recommendation:", result['recommendation'])
-        print("\nFull Analysis:")
-        print(result['full_analysis'])
+        # Remove common words that might appear in first sentence
+        common_words = {'the', 'has', 'with', 'and', 'for', 'that', 'this', 'are', 'new'}
+        potential_tokens = [token for token in potential_tokens if token not in common_words]
         
-        # Get celebrity opinions in parallel with saving results
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            # Start getting celebrity opinions
-            opinions_future = executor.submit(get_multiple_opinions, args.coin, result['full_analysis'])
+        if not potential_tokens:
+            return False, None
+        
+        # Search for the first potential token name
+        url = "https://api.coingecko.com/api/v3/search"
+        headers = {
+            "accept": "application/json",
+            "x-cg-demo-api-key": COINGECKO_API_KEY
+        }
+        
+        for token in potential_tokens[:2]:  # Check first two potential tokens
+            params = {"query": token}
+            response = requests.get(url, headers=headers, params=params)
             
-            # Prepare results for saving
-            output_data = {
-                'coin': args.coin,
-                'analysis_date': datetime.now().isoformat(),
-                'image_path': args.image,
-                'description': args.description,
-                'recommendation': result['recommendation'],
-                'full_analysis': result['full_analysis'],
-                'twitter_analysis': result['twitter_analysis']
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('coins'):
+                    return True, token
+        
+        return False, potential_tokens[0] if potential_tokens else None
+    except Exception as e:
+        print(f"Error checking token existence: {e}")
+        return False, None
+
+def analyze_content(input_data):
+    """
+    Analyzes the sentiment based on provided image, pitch, and token name.
+    First checks if the token already exists on CoinGecko.
+    """
+    try:
+        if not isinstance(input_data, dict) or 'image' not in input_data or 'pitch' not in input_data or 'token_name' not in input_data:
+            raise ValueError("Input must be a dictionary with 'image', 'pitch', and 'token_name' keys")
+
+        # Check if token exists on CoinGecko
+        url = "https://api.coingecko.com/api/v3/search"
+        headers = {
+            "accept": "application/json",
+            "x-cg-demo-api-key": COINGECKO_API_KEY
+        }
+        params = {"query": input_data['token_name']}
+        response = requests.get(url, headers=headers, params=params)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('coins'):
+                return {
+                    'sentiment': 'REJECTED',
+                    'reason': f"Token '{input_data['token_name']}' already exists on CoinGecko",
+                    'pitch': input_data['pitch']
+                }
+
+        device = get_device()
+        model_id = "microsoft/Phi-3.5-vision-instruct"
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            device_map=device,
+            trust_remote_code=True,
+            torch_dtype=torch.float32,
+            _attn_implementation='eager'
+        )
+        processor = AutoProcessor.from_pretrained(
+            model_id,
+            trust_remote_code=True,
+            num_crops=16
+        )
+        
+        # Download image
+        image = download_image(input_data['image'])
+        if image is None:
+            raise Exception("Failed to download image")
+        
+        # Get image description
+        messages = [
+            {"role": "user", "content": f"<|image_1|>\nDescribe this image in one sentence:"}
+        ]
+        prompt = processor.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+        
+        inputs = processor(prompt, [image], return_tensors="pt")
+        if device != "cpu":
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+        
+        with torch.no_grad():
+            desc_ids = model.generate(
+                **inputs,
+                max_new_tokens=50,
+                temperature=0.7,
+                do_sample=True,
+                eos_token_id=processor.tokenizer.eos_token_id,
+            )
+        
+        desc_ids = desc_ids[:, inputs['input_ids'].shape[1]:]
+        image_description = processor.batch_decode(
+            desc_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=True
+        )[0].strip()
+        
+        # Use token name for tweet search instead of first 3 words
+        recent_tweets = get_tweets(input_data['token_name'])
+        tweets_text = "\n".join([f"Recent Tweet: {tweet}" for tweet in recent_tweets])
+        
+        # Analyze everything together
+        messages = [
+            {"role": "user", "content": f"<|image_1|>\nBased on the following information, first verify if the image matches the pitch. If they don't match, respond with 'REJECT'. If they match, respond with either 'BULLISH' or 'BEARISH' for the overall market sentiment:\n\nPitch: {input_data['pitch']}\n\nImage description: {image_description}\n\nRecent Tweets:\n{tweets_text}"}
+        ]
+        
+        prompt = processor.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+        
+        inputs = processor(prompt, [image], return_tensors="pt")
+        if device != "cpu":
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+        
+        with torch.no_grad():
+            generate_ids = model.generate(
+                **inputs,
+                max_new_tokens=10,
+                temperature=0.7,
+                do_sample=True,
+                eos_token_id=processor.tokenizer.eos_token_id,
+            )
+        
+        generate_ids = generate_ids[:, inputs['input_ids'].shape[1]:]
+        response = processor.batch_decode(
+            generate_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=True
+        )[0].strip().lower()
+        
+        if 'reject' in response:
+            return {
+                'sentiment': 'REJECTED',
+                'reason': 'Image content does not match the pitch',
+                'pitch': input_data['pitch'],
+                'image_description': image_description,
+                'recent_tweets': recent_tweets
             }
-            
-            # Get celebrity opinions result
-            celebrity_opinions = opinions_future.result()
-            output_data['celebrity_opinions'] = [(celeb, opinion) for celeb, opinion in celebrity_opinions]
-            
-            # Print celebrity opinions
-            print("\n=== Celebrity Opinions ===")
-            for celeb, opinion in celebrity_opinions:
-                print(f"\n{celeb}: {opinion}")
-            
-            # Save complete results
-            output_file = f"{args.coin}_complete_analysis.json"
-            with open(output_file, 'w') as f:
-                json.dump(output_data, f, indent=2)
-            print(f"\nComplete analysis saved to {output_file}")
+        
+        return {
+            'sentiment': 'bullish' if 'bull' in response else 'bearish',
+            'pitch': input_data['pitch'],
+            'image_description': image_description,
+            'recent_tweets': recent_tweets
+        }
         
     except Exception as e:
-        print(f"Error during analysis: {str(e)}")
+        print(f"Error in analysis: {e}")
+        return None
+
+def main():
+    try:
+        # Read JSON input from stdin
+        input_json = json.loads(input())
+        
+        # Validate required fields
+        required_fields = ['image', 'token_name', 'pitch']
+        if not all(field in input_json for field in required_fields):
+            raise ValueError("Input JSON must contain 'image', 'token_name', and 'pitch' fields")
+        
+        result = analyze_content(input_json)
+        if result:
+            # Convert result to JSON output
+            output = {
+                'sentiment': result['sentiment'],
+                'image_description': result.get('image_description', ''),
+                'recent_tweets': result.get('recent_tweets', [])
+            }
+            if result['sentiment'] == 'REJECTED':
+                output['reason'] = result['reason']
+            
+            # Print JSON output
+            print(json.dumps(output))
+        else:
+            print(json.dumps({'error': 'Analysis failed'}))
+            
+    except json.JSONDecodeError:
+        print(json.dumps({'error': 'Invalid JSON input'}))
+    except Exception as e:
+        print(json.dumps({'error': str(e)}))
 
 if __name__ == "__main__":
     main()
